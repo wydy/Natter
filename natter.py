@@ -94,6 +94,43 @@ class NatterExit(object):
         NatterExit._atexit[0] = func
 
 
+class InputRule(object):
+    @staticmethod
+    def iptables(iptables_cmd, rule):
+        check_rule = ["-C" if arg in ("-I", "-A") else arg for arg in rule]
+        try:
+            subprocess.check_output(
+                iptables_cmd + check_rule
+            )
+        except subprocess.CalledProcessError:
+            subprocess.check_output(
+                iptables_cmd + rule
+            )
+
+    @staticmethod
+    def nftables(nftables_cmd, rule):
+        rule_parts = rule[0].split()
+        action = rule_parts[0]
+        if action == 'insert' and 'rule' in rule_parts:
+            table = rule_parts[3]
+            chain = rule_parts[4]
+
+            try:
+                output = subprocess.check_output(
+                    nftables_cmd + ["list", "chain", "ip", table, chain]
+                ).decode("utf-8")
+            except subprocess.CalledProcessError as e:
+                Logger.error("Insert rule to chain failed")
+                return
+
+            actor = " ".join(rule_parts[6:])
+
+            if actor not in output:
+                subprocess.check_output(
+                    nftables_cmd + rule
+                )
+
+
 class PortTest(object):
     def test_lan(self, addr, source_ip=None, interface=None, info=False):
         print_status = Logger.info if info else Logger.debug
@@ -513,33 +550,24 @@ class ForwardIptables(object):
         return True
 
     def _iptables_init(self):
+        Logger.debug("fwd-iptables: Creating Natter chain")
         try:
             subprocess.check_output(
-                self.iptables_cmd + ["-t", "nat", "--list-rules", "NATTER"],
+                self.iptables_cmd + ["-t", "nat", "-N", "NATTER"],
                 stderr=subprocess.STDOUT
             )
-            return
-        except subprocess.CalledProcessError:
+        except:
             pass
-        Logger.debug("fwd-iptables: Creating Natter chain")
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-N", "NATTER"]
-        )
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-I", "PREROUTING", "-j", "NATTER"]
-        )
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-I", "OUTPUT", "-j", "NATTER"]
-        )
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-N", "NATTER_SNAT"]
-        )
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-I", "POSTROUTING", "-j", "NATTER_SNAT"]
-        )
-        subprocess.check_output(
-            self.iptables_cmd + ["-t", "nat", "-I", "INPUT", "-j", "NATTER_SNAT"]
-        )
+        InputRule.iptables(self.iptables_cmd, ["-t", "nat", "-I", "PREROUTING", "-j", "NATTER"])
+        InputRule.iptables(self.iptables_cmd, ["-t", "nat", "-I", "OUTPUT", "-j", "NATTER"])
+        try:
+            subprocess.check_output(
+                self.iptables_cmd + ["-t", "nat", "-N", "NATTER_SNAT"],
+                stderr=subprocess.STDOUT
+            )
+        except:
+            pass
+        InputRule.iptables(self.iptables_cmd, ["-t", "nat", "-I", "POSTROUTING", "-j", "NATTER_SNAT"])
 
     def _iptables_clean(self):
         Logger.debug("fwd-iptables: Cleaning up Natter rules")
@@ -555,7 +583,6 @@ class ForwardIptables(object):
             except subprocess.CalledProcessError as ex:
                 Logger.error("fwd-iptables: Failed to execute %s: %s" % (ex.cmd, ex.output))
                 continue
-
     def start_forward(self, ip, port, toip, toport, udp=False):
         if ip != toip:
             self._check_sys_forward_config()
@@ -669,33 +696,24 @@ class ForwardNftables(object):
         return True
 
     def _nftables_init(self):
+        Logger.debug("fwd-nftables: Creating Natter chain")
         try:
             subprocess.check_output(
-                self.nftables_cmd + ["list chain ip nat NATTER"],
+                self.nftables_cmd + ["add chain ip nat NATTER"],
                 stderr=subprocess.STDOUT
             )
-            return
-        except subprocess.CalledProcessError:
+        except:
             pass
-        Logger.debug("fwd-nftables: Creating Natter chain")
-        subprocess.check_output(
-            self.nftables_cmd + ["add chain ip nat NATTER"]
-        )
-        subprocess.check_output(
-            self.nftables_cmd + ["insert rule ip nat PREROUTING counter jump NATTER"]
-        )
-        subprocess.check_output(
-            self.nftables_cmd + ["insert rule ip nat OUTPUT counter jump NATTER"]
-        )
-        subprocess.check_output(
-            self.nftables_cmd + ["add chain ip nat NATTER_SNAT"]
-        )
-        subprocess.check_output(
-            self.nftables_cmd + ["insert rule ip nat PREROUTING counter jump NATTER_SNAT"]
-        )
-        subprocess.check_output(
-            self.nftables_cmd + ["insert rule ip nat OUTPUT counter jump NATTER_SNAT"]
-        )
+        InputRule.nftables(self.nftables_cmd, ["insert rule ip nat prerouting counter jump NATTER"])
+        InputRule.nftables(self.nftables_cmd, ["insert rule ip nat output counter jump NATTER"])
+        try:
+            subprocess.check_output(
+                self.nftables_cmd + ["add chain ip nat NATTER_SNAT"],
+                stderr=subprocess.STDOUT
+            )
+        except:
+            pass
+        InputRule.nftables(self.nftables_cmd, ["insert rule ip nat postrouting counter jump NATTER_SNAT"])
 
     def _nftables_clean(self):
         Logger.debug("fwd-nftables: Cleaning up Natter rules")
@@ -1767,6 +1785,7 @@ def natter_main(show_title = True):
             os.path.abspath(notify_sh), protocol, str(inner_ip), str(inner_port), str(outer_ip), str(outer_port)
         ], shell=False)
 
+    time.sleep(1)
     # Display check results, TCP only
     if not udp_mode:
         ret1 = port_test.test_lan(to_addr, info=True)
